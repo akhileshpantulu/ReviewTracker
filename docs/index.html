@@ -415,16 +415,21 @@ function rerender(){ if(!focal) return; currentTab==='deepdive'?renderDeepDive()
 
 /* ---------- ranking math ---------- */
 function idxRank(arr,code,chain){ const i=arr.findIndex(x=>x.code===code&&x.chain===chain); if(i<0) return null; const N=arr.length; return {rank:i+1,N:N,pct:N>1?(N-(i+1))/(N-1)*100:100}; }
-function computeRanking(){
-  const chain=focal.chain||'Marriott';
-  const brand=resolveBrand(focal.b, focal.n);
-  const cont=focal.ct||continentOf(focal.c);
+function computeRankingFor(asset){
+  const chain=asset.chain||'Marriott';
+  const brand=resolveBrand(asset.b, asset.n);
+  const cont=asset.ct||continentOf(asset.c);
   let pool=catalog.filter(p=>(p.chain||'Marriott')===chain&&p.b===brand&&p.s!=null&&(p.nr||0)>=minRev&&!isStale(p));
-  if(!pool.some(p=>p.c===focal.c&&(p.chain||'Marriott')===chain)) pool=pool.concat([focal]);
+  if(!pool.some(p=>p.c===asset.c&&(p.chain||'Marriott')===chain)) pool=pool.concat([asset]);
   pool=pool.map(p=>({code:p.c,name:p.n,sc:p.s,n:p.nr||0,cont:p.ct||continentOf(p.c),chain:(p.chain||'Marriott')})).sort((a,b)=>b.sc-a.sc);
-  const world=idxRank(pool,focal.c,chain);
+  const world=idxRank(pool,asset.c,chain);
   const buckets={}; pool.forEach(x=>{(buckets[x.cont]=buckets[x.cont]||[]).push(x);});
-  const contRank=idxRank(buckets[cont]||[],focal.c,chain);
+  const contRank=idxRank(buckets[cont]||[],asset.c,chain);
+  return {chain,brand,cont,pool,buckets,world,contRank};
+}
+function computeRanking(){
+  const base=computeRankingFor(focal);
+  const chain=base.chain;
   // comp set
   let compRank=null, compArr=[];
   if(comp.length){
@@ -432,7 +437,7 @@ function computeRanking(){
       .map(p=>({code:p.c,name:p.n,sc:p.s,n:p.nr||0,chain:(p.chain||'Marriott')})).sort((a,b)=>b.sc-a.sc);
     compRank=idxRank(compArr,focal.c,chain);
   }
-  return {chain,brand,cont,pool,buckets,world,contRank,compRank,compArr};
+  return Object.assign({},base,{compRank,compArr});
 }
 
 /* ---------- Overview render ---------- */
@@ -481,6 +486,33 @@ function renderOverview(){
   if(comp.length) h+=rankCard('',`Rank in your comp set`,R.compRank, `${(R.compArr||[]).length} hotels`);
   else h+=`<div class="rankcard"><div class="rc-k">Comp set</div><div class="rc-empty">Add competitors with “+ compare” in search to rank ${escapeHtml(shortBrand(R.brand))} against a custom set.</div></div>`;
   h+=`</div>`;
+  // per-asset rankings overview (comp set)
+  if(comp.length){
+    const rows=assetList().map(it=>{
+      const AR=computeRankingFor(it);
+      return {it,AR,isF:it.c===focal.c&&(it.chain||'Marriott')===chain};
+    }).sort((a,b)=>{
+      if(a.it.s==null&&b.it.s==null) return 0;
+      if(a.it.s==null) return 1; if(b.it.s==null) return -1;
+      return b.it.s-a.it.s;
+    });
+    let cr=0;
+    h+=`<div class="panel"><div class="panel-h"><h3>Comp set — rankings per asset (${rows.length} hotels)</h3><div class="hint">brand ranks are within each hotel’s own chain &amp; brand · min ${minRev} reviews</div></div>`+
+       `<div class="panel-b" style="overflow-x:auto"><table class="tbl"><thead><tr><th>#</th><th>Hotel</th><th>Brand</th><th class="num">Rating</th><th class="num">Reviews</th><th class="num">Rank in continent</th><th class="num">Rank worldwide</th></tr></thead><tbody>`;
+    rows.forEach(r=>{
+      const ch=r.it.chain||'Marriott';
+      const rank=r.it.s!=null?++cr:null;
+      const contStr=r.AR.contRank?`#${r.AR.contRank.rank} / ${r.AR.contRank.N} <span style="color:var(--faint)">(${escapeHtml(r.AR.cont)})</span>`:'—';
+      const worldStr=r.AR.world?`#${r.AR.world.rank} / ${r.AR.world.N}`:'—';
+      h+=`<tr class="${r.isF?'foc':''}"><td class="num">${rank!=null?rank:'—'}</td>`+
+         `<td>${escapeHtml(r.it.n)}${r.isF?' <span class="tag-focal">Focal</span>':''}</td>`+
+         `<td><span class="chip-chain chain-${ch}">${ch}</span> <span style="color:var(--muted)">${escapeHtml(shortBrand(r.AR.brand))}</span></td>`+
+         `<td class="num">${r.it.s!=null?`<span class="pill ${gradeClass(r.it.s)}">${r.it.s.toFixed(2)}</span>`:'—'}</td>`+
+         `<td class="num">${(r.it.nr||0).toLocaleString()}</td>`+
+         `<td class="num">${contStr}</td><td class="num">${worldStr}</td></tr>`;
+    });
+    h+=`</tbody></table></div></div>`;
+  }
   // continent table
   h+=`<div class="panel"><div class="panel-h"><h3>${escapeHtml(R.brand)} — rating by continent</h3>`+
      `<div class="ctl">Min reviews / hotel <select onchange="setMinRev(this.value)">`+[1,5,10,25,50].map(v=>`<option value="${v}"${v===minRev?' selected':''}>${v}</option>`).join('')+`</select></div></div>`+
