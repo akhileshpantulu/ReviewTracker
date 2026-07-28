@@ -42,8 +42,10 @@ python3 -m http.server 8000 --directory docs
 
 [`review-watch.yml`](.github/workflows/review-watch.yml) polls the Bazaarvoice
 API hourly for **Moxy Paris La Villette** and opens a GitHub issue whenever the
-hotel's review count changes — up or down. The issue is assigned to the repo
-owner, so GitHub emails it; there is no mail server or account involved.
+hotel's review count changes — up or down. GitHub emails the issue through
+your repo watch notifications; there is no mail server or account involved.
+One caveat: if you ever **Unwatch** this repository, the emails stop silently
+while the issues keep being filed.
 
 - New reviews: the issue includes each review's rating, title, text, and date
   (up to 5), plus the updated average.

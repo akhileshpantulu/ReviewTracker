@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
  * Watches one hotel's Bazaarvoice review count and opens a GitHub issue
- * whenever it changes. GitHub emails the issue to the repo owner (issues are
- * assigned to them), so no mail account or SMTP server is involved.
+ * whenever it changes. GitHub emails the issue to anyone watching the repo
+ * (the owner watches by default), so no mail account or SMTP server is
+ * involved — but note that unwatching the repo silently stops the emails.
  *
  * Runs inside .github/workflows/review-watch.yml on an hourly cron. State is
  * kept in .state/review-watch.json and committed back by the workflow, so a
@@ -25,7 +26,6 @@ const DASHBOARD_URL = 'https://akhileshpantulu.github.io/ReviewTracker/';
 const BV_API = 'https://api.bazaarvoice.com/data';
 const GH_API = process.env.GITHUB_API_URL || 'https://api.github.com';
 const REPO = process.env.GITHUB_REPOSITORY;
-const OWNER = REPO ? REPO.split('/')[0] : null;
 const TOKEN = process.env.GH_TOKEN;
 
 /* ---------- Bazaarvoice ---------- */
@@ -115,7 +115,6 @@ async function openIssue(title, body) {
   const r = await ghRequest('POST', `/repos/${REPO}/issues`, {
     title,
     body,
-    assignees: OWNER ? [OWNER] : [],
     labels: ['new-review'],
   });
   if (!r.ok) throw new Error(`Issue creation failed: HTTP ${r.status} ${await r.text()}`);
