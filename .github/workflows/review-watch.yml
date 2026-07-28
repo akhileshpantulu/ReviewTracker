@@ -1,0 +1,42 @@
+name: Review watch — Moxy Paris La Villette
+
+on:
+  schedule:
+    # Hourly, off the top of the hour — :00 crons queue behind everyone
+    # else's and can be delayed 30+ minutes.
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # commit the updated review count back to the repo
+  issues: write     # the notification is a GitHub issue (GitHub emails it)
+
+# Never let two checks race each other's state commit.
+concurrency:
+  group: review-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for new reviews
+        run: node scripts/review-watch.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Commit updated state
+        run: |
+          if [ -n "$(git status --porcelain .state)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .state/review-watch.json
+            git commit -m "chore: review-watch state for Moxy Paris La Villette"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push
+          else
+            echo "No state change to commit."
+          fi

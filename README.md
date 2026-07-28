@@ -38,6 +38,32 @@ python3 -m http.server 8000 --directory docs
 # then visit http://localhost:8000
 ```
 
+## Review watch (email on new reviews)
+
+[`review-watch.yml`](.github/workflows/review-watch.yml) polls the Bazaarvoice
+API hourly for **Moxy Paris La Villette** and opens a GitHub issue whenever the
+hotel's review count changes — up or down. The issue is assigned to the repo
+owner, so GitHub emails it; there is no mail server or account involved.
+
+- New reviews: the issue includes each review's rating, title, text, and date
+  (up to 5), plus the updated average.
+- Count decreases (moderation/removals) are reported too.
+- The last-seen count lives in `.state/review-watch.json`, committed back by
+  the workflow, so restarts and re-runs don't re-notify.
+- First run resolves the hotel's product ID from the catalog by name, caches
+  it in the state file, and opens a "watch started" issue to confirm the email
+  path works.
+
+The cron only fires once this workflow is on the default branch. To test it
+immediately, run it from the Actions tab (**Review watch** → *Run workflow*).
+To watch a different hotel, edit `HOTEL_LABEL`/`HOTEL_TOKENS` at the top of
+[`scripts/review-watch.mjs`](scripts/review-watch.mjs) and delete
+`.state/review-watch.json` so the ID re-resolves.
+
+Note: GitHub pauses scheduled workflows in repositories with no activity for
+60 days; it emails a warning first, and re-enabling is one click on the
+Actions tab.
+
 ## Data source
 
 The page calls the Bazaarvoice guest-review API directly from the browser:
