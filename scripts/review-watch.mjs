@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 /**
  * Watches one hotel's Bazaarvoice review count and opens a GitHub issue
- * whenever it changes. GitHub emails the issue to anyone watching the repo
- * (the owner watches by default), so no mail account or SMTP server is
- * involved — but note that unwatching the repo silently stops the emails.
+ * whenever it changes. No mail account or SMTP server is involved: the issue
+ * @mentions NOTIFY, and GitHub emails mentions via its "Participating and
+ * @mentions" notification path.
+ *
+ * The mention is load-bearing, not decoration. Watch-based notifications alone
+ * do not reach this repo's owner — an account can have "Watching" email turned
+ * off while participating notifications still send, which is exactly what
+ * happened here: an issue with no mention produced no email at all.
  *
  * Runs inside .github/workflows/review-watch.yml on an hourly cron. State is
  * kept in .state/review-watch.json and committed back by the workflow, so a
@@ -22,6 +27,9 @@ const HOTEL_TOKENS = ['moxy', 'villette']; // catalog name must contain all of t
 const STATE_PATH = '.state/review-watch.json';
 const MAX_REVIEWS_IN_ISSUE = 5;
 const DASHBOARD_URL = 'https://akhileshpantulu.github.io/ReviewTracker/';
+// Who gets @mentioned — and therefore emailed. Add usernames to notify more
+// people; each must have read access to the repo for the mention to notify.
+const NOTIFY = ['akhileshpantulu'];
 
 const BV_API = 'https://api.bazaarvoice.com/data';
 const GH_API = process.env.GITHUB_API_URL || 'https://api.github.com';
@@ -112,9 +120,10 @@ async function ghRequest(method, path, body) {
 async function openIssue(title, body) {
   // Label is cosmetic — create it if missing, ignore "already exists".
   await ghRequest('POST', `/repos/${REPO}/labels`, { name: 'new-review', color: '1d76db' });
+  const mentions = NOTIFY.map(u => `@${u.replace(/^@/, '')}`).join(' ');
   const r = await ghRequest('POST', `/repos/${REPO}/issues`, {
     title,
-    body,
+    body: mentions ? `${mentions}\n\n${body}` : body,
     labels: ['new-review'],
   });
   if (!r.ok) throw new Error(`Issue creation failed: HTTP ${r.status} ${await r.text()}`);
@@ -183,6 +192,19 @@ async function main() {
   }
 
   if (stats.count === prev) {
+    if (process.env.FORCE_NOTIFY === 'true') {
+      // Manual "does email still work?" check. Reports real current data but
+      // leaves the stored count alone, so it can't mask a genuine change.
+      const [latest] = await latestReviews(productId, 1);
+      await openIssue(
+        `Test notification — ${HOTEL_LABEL}`,
+        `Delivery test, not a new review. **${stats.name}** is unchanged at ` +
+        `**${stats.count} reviews**, average ${stats.avg != null ? `★${stats.avg}` : 'n/a'}.\n\n` +
+        `Most recent review on file:\n\n${latest ? formatReview(latest) : '_none returned_'}` +
+        issueFooter(productId),
+      );
+      return;
+    }
     console.log(`No change (${stats.count} reviews).`);
     return;
   }

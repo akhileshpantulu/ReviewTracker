@@ -42,10 +42,16 @@ python3 -m http.server 8000 --directory docs
 
 [`review-watch.yml`](.github/workflows/review-watch.yml) polls the Bazaarvoice
 API hourly for **Moxy Paris La Villette** and opens a GitHub issue whenever the
-hotel's review count changes — up or down. GitHub emails the issue through
-your repo watch notifications; there is no mail server or account involved.
-One caveat: if you ever **Unwatch** this repository, the emails stop silently
-while the issues keep being filed.
+hotel's review count changes — up or down. There is no mail server or account
+involved: the issue **@mentions** the users listed in `NOTIFY` at the top of the
+script, and GitHub emails mentions through its "Participating and @mentions"
+notification path.
+
+The mention is what delivers the email. Watching the repository is *not*
+sufficient — this account has "Watching" email notifications off, so an issue
+with no mention gets filed silently and no email goes out (verified the hard
+way on issue #5). To notify additional people, add their usernames to `NOTIFY`;
+each needs read access to the repo for the mention to register.
 
 - New reviews: the issue includes each review's rating, title, text, and date
   (up to 5), plus the updated average.
