@@ -6,6 +6,11 @@ on:
     # else's and can be delayed 30+ minutes.
     - cron: '23 * * * *'
   workflow_dispatch:
+    inputs:
+      force_notify:
+        description: 'Send a test notification even if the count has not changed'
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # commit the updated review count back to the repo
@@ -27,6 +32,7 @@ jobs:
         run: node scripts/review-watch.mjs
         env:
           GH_TOKEN: ${{ github.token }}
+          FORCE_NOTIFY: ${{ inputs.force_notify }}
 
       - name: Commit updated state
         run: |
