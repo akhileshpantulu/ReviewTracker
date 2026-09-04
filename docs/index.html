@@ -151,6 +151,10 @@ a{color:var(--accent);text-decoration:none;}
 .dd-asset.dd-focal{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft),var(--shadow);}
 .dd-asset .chart-card{box-shadow:none;border-color:var(--line);}
 .tag-focal{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;background:var(--accent-soft);color:var(--accent);padding:2px 7px;border-radius:6px;vertical-align:middle;margin-left:6px;}
+.rm-asset{padding:9px 0;border-bottom:1px solid var(--line);}
+.rm-asset:last-child{border-bottom:none;}
+.rm-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;}
+.rm-note{color:var(--muted);font-size:12px;}
 .cats{display:flex;flex-wrap:wrap;gap:14px;color:var(--muted);font-size:12px;margin:2px 0 14px;}
 .cats b{color:var(--text);}
 .footer{color:var(--faint);font-size:11px;margin-top:26px;line-height:1.7;border-top:1px solid var(--border);padding-top:16px;}
@@ -190,6 +194,8 @@ const CATALOG_TTL_MS = 30 * 24 * 3600 * 1000;
 const STALE_MS = 24 * 30 * 24 * 3600 * 1000;
 const LS_FOCAL = 'hrr_focal_v1';
 const LS_COMP = 'hrr_comp_v1';
+const LS_SNAP = 'hrr_snap_v1:';     // + chain:code -> last-seen review snapshot
+const LS_REMOVED = 'hrr_removed_v1'; // log of reviews that disappeared between refreshes
 
 const THEMES = {
   'Small/cramped rooms': /\b(tiny|cramped|small room|too small|claustrophobic|petite chambre|chambre exigu)/i,
@@ -362,14 +368,17 @@ function catalogReady(){
   // restore focal if saved
   if(!focal){ try{ const sv=JSON.parse(localStorage.getItem(LS_FOCAL)); if(sv&&sv.chain&&sv.code){ const it=catalog.find(p=>(p.chain||'Marriott')===sv.chain&&p.c===sv.code); if(it) selectFocal(it,true); } }catch(e){} }
   try{ const cs=JSON.parse(localStorage.getItem(LS_COMP)); if(Array.isArray(cs)){ comp=cs.map(x=>catalog.find(p=>(p.chain||'Marriott')===x.chain&&p.c===x.code)).filter(Boolean); } }catch(e){}
+  comp.forEach(p=>ensureReviews(p)); // refresh comp snapshots too, so removal tracking covers the whole set
   if(focal) renderOverview();
 }
 
 /* ---------- reviews fetch (focal only) ---------- */
 async function fetchAll(productId, chain){
-  const key=PASSKEYS[chain]||PASSKEYS.Marriott; let all=[],offset=0;
-  while(true){ const url=`https://api.bazaarvoice.com/data/reviews.json?passkey=${key}&apiversion=5.5&Filter=ProductId:${productId.toUpperCase()}&Sort=SubmissionTime:asc&Limit=100&Offset=${offset}`; const j=await (await fetch(url)).json(); all=all.concat(j.Results||[]); if(!j.TotalResults||all.length>=j.TotalResults||(j.Results||[]).length===0) break; offset+=100; if(offset>4000)break; }
-  return all.map(r=>({date:r.SubmissionTime,overall:r.Rating,title:r.Title||'',text:r.ReviewText||'',Cleanliness:r.SecondaryRatings?.Cleanliness?.Value,Service:r.SecondaryRatings?.Service?.Value,Location:r.SecondaryRatings?.Location?.Value,Amenities:r.SecondaryRatings?.Amenities?.Value,Dining:r.SecondaryRatings?.Dining?.Value,Value:r.SecondaryRatings?.Value?.Value}));
+  const key=PASSKEYS[chain]||PASSKEYS.Marriott; let all=[],offset=0,partial=false;
+  while(true){ const url=`https://api.bazaarvoice.com/data/reviews.json?passkey=${key}&apiversion=5.5&Filter=ProductId:${productId.toUpperCase()}&Sort=SubmissionTime:asc&Limit=100&Offset=${offset}`; const j=await (await fetch(url)).json(); all=all.concat(j.Results||[]); if(!j.TotalResults||all.length>=j.TotalResults||(j.Results||[]).length===0) break; offset+=100; if(offset>4000){partial=true;break;} }
+  const out=all.map(r=>({id:r.Id,date:r.SubmissionTime,overall:r.Rating,title:r.Title||'',text:r.ReviewText||'',Cleanliness:r.SecondaryRatings?.Cleanliness?.Value,Service:r.SecondaryRatings?.Service?.Value,Location:r.SecondaryRatings?.Location?.Value,Amenities:r.SecondaryRatings?.Amenities?.Value,Dining:r.SecondaryRatings?.Dining?.Value,Value:r.SecondaryRatings?.Value?.Value}));
+  out.partial=partial; // true when the fetch was truncated — snapshot comparison would be unreliable
+  return out;
 }
 
 /* ---------- search ---------- */
@@ -540,6 +549,8 @@ function renderOverview(){
   if(!comp.length){ h+=`<div style="color:var(--muted);font-size:13px">No competitors added. Search a hotel and click “+ compare” to benchmark ${escapeHtml(focal.n)} against a set you choose.</div>`; }
   else{ h+=`<div class="comp-chips">`; comp.forEach((p,i)=>{ h+=`<span class="cchip"><span class="chip-chain chain-${p.chain||'Marriott'}">${p.chain||'Marriott'}</span> ${escapeHtml(p.n)} <span class="num" style="color:var(--muted)">${p.s!=null?p.s.toFixed(2):'—'}</span><button class="x" onclick="removePeer(${i})">×</button></span>`; }); h+=`</div>`; }
   h+=`</div></div>`;
+  // removed-review tracker
+  h+=removedPanel();
   h+=`<div style="margin-top:6px"><a onclick="showTab('deepdive')" style="cursor:pointer;font-weight:600">View review deep dive for ${escapeHtml(focal.n)} →</a></div>`;
   V.innerHTML=h;
   renderFooter();
@@ -555,8 +566,60 @@ function ensureReviews(it){
   if(reviewCache[k]!==undefined || pendingReviews[k]) return;
   pendingReviews[k]=1;
   fetchAll(it.c, it.chain||'Marriott')
-    .then(rv=>{ reviewCache[k]=rv; delete pendingReviews[k]; if(currentTab==='deepdive') renderDeepDive(); })
+    .then(rv=>{ reviewCache[k]=rv; delete pendingReviews[k]; trackRemoved(it,rv); if(currentTab==='deepdive') renderDeepDive(); else if(focal) renderOverview(); })
     .catch(()=>{ reviewCache[k]=[]; delete pendingReviews[k]; if(currentTab==='deepdive') renderDeepDive(); });
+}
+
+/* ---------- removed-review tracker ---------- */
+function loadRemovedLog(){ try{ return JSON.parse(localStorage.getItem(LS_REMOVED))||{}; }catch(e){ return {}; } }
+function saveRemovedLog(log){ try{ localStorage.setItem(LS_REMOVED, JSON.stringify(log)); }catch(e){} }
+function loadSnap(k){ try{ return JSON.parse(localStorage.getItem(LS_SNAP+k)); }catch(e){ return null; } }
+function trackRemoved(it, rv){
+  // Skip unreliable comparisons: truncated fetches and empty results (likely an API glitch, not a mass removal).
+  if(rv.partial || !rv.length) return;
+  const k=keyOf(it);
+  const prev=loadSnap(k);
+  const nowIds=new Set(rv.map(r=>r.id).filter(Boolean));
+  if(prev && Array.isArray(prev.e)){
+    const gone=prev.e.filter(s=>s.i && !nowIds.has(s.i));
+    if(gone.length){
+      const log=loadRemovedLog();
+      const slot=log[k]=log[k]||{n:it.n,e:[]};
+      const seen=new Set(slot.e.map(x=>x.i));
+      gone.forEach(g=>{ if(!seen.has(g.i)) slot.e.push(Object.assign({},g,{rm:Date.now()})); });
+      slot.e=slot.e.slice(-100); slot.n=it.n;
+      saveRemovedLog(log);
+    }
+  }
+  const snap={t:Date.now(),e:rv.filter(r=>r.id).map(r=>({i:r.id,d:String(r.date||'').slice(0,10),o:r.overall,t:String(r.title||'').slice(0,80),x:String(r.text||'').slice(0,140)}))};
+  try{ localStorage.setItem(LS_SNAP+k, JSON.stringify(snap)); }
+  catch(e){ try{ snap.e=snap.e.map(s=>({i:s.i,d:s.d,o:s.o})); localStorage.setItem(LS_SNAP+k, JSON.stringify(snap)); }catch(e2){} }
+}
+function clearRemoved(){ try{ localStorage.removeItem(LS_REMOVED); }catch(e){} rerender(); }
+function removedPanel(){
+  const log=loadRemovedLog();
+  const list=assetList();
+  if(!list.length) return '';
+  let total=0; list.forEach(it=>{ const s=log[keyOf(it)]; if(s&&s.e) total+=s.e.length; });
+  let h=`<div class="panel"><div class="panel-h"><h3>Removed reviews${total?` <span class="pill b" style="margin-left:4px">${total}</span>`:''}</h3>`+
+     `<div class="hint">reviews that disappeared between refreshes · tracked in this browser${total?` · <a onclick="clearRemoved()" style="cursor:pointer">clear log</a>`:''}</div></div><div class="panel-b">`;
+  list.forEach(it=>{
+    const k=keyOf(it); const slot=log[k]; const snap=loadSnap(k); const ch=it.chain||'Marriott';
+    h+=`<div class="rm-asset"><div class="rm-head"><span class="chip-chain chain-${ch}">${ch}</span> <b>${escapeHtml(it.n)}</b>`;
+    if(slot&&slot.e.length) h+=` <span class="pill b">${slot.e.length} removed</span>`;
+    if(snap) h+=` <span class="rm-note">baseline ${snap.e.length.toLocaleString()} reviews · saved ${new Date(snap.t).toISOString().slice(0,10)}${slot&&slot.e.length?'':' · none removed yet'}</span>`;
+    else if(pendingReviews[k]) h+=` <span class="rm-note">loading reviews…</span>`;
+    else h+=` <span class="rm-note">no baseline yet</span>`;
+    h+=`</div>`;
+    if(slot&&slot.e.length){
+      const show=slot.e.slice().reverse().slice(0,5);
+      show.forEach(g=>{ h+=`<div class="quote"><div class="qd">reviewed ${escapeHtml(g.d||'?')}${g.o!=null?' · '+g.o+'★':''} · removal detected ${new Date(g.rm).toISOString().slice(0,10)}</div>${g.t?`<div class="qt">${escapeHtml(g.t)}</div>`:''}${g.x?`<div class="qx">${escapeHtml(g.x)}${g.x.length>=140?'…':''}</div>`:''}</div>`; });
+      if(slot.e.length>show.length) h+=`<div class="rm-note" style="margin-top:6px">…and ${slot.e.length-show.length} more</div>`;
+    }
+    h+=`</div>`;
+  });
+  h+=`</div></div>`;
+  return h;
 }
 function assetList(){ const list=[]; const seen={}; if(focal){ list.push(focal); seen[keyOf(focal)]=1; } comp.forEach(p=>{ const k=keyOf(p); if(!seen[k]){ seen[k]=1; list.push(p); } }); return list; }
 
@@ -622,7 +685,7 @@ function showTab(t){
 }
 
 function renderFooter(){
-  $('footer').innerHTML='Source: Bazaar Voice guest-review API (Marriott Bonvoy + IHG display keys). Ratings are verified post-stay guest reviews. A hotel is ranked within its own chain and brand; continent is taken from each hotel\'s country (IHG) or metro-code prefix (Marriott). Rankings need a minimum review count per hotel (adjustable) and exclude inactive listings (no new review in 24+ months, e.g. rebranded or closed hotels). Catalog is cached locally and refreshes monthly.';
+  $('footer').innerHTML='Source: Bazaar Voice guest-review API (Marriott Bonvoy + IHG display keys). Ratings are verified post-stay guest reviews. A hotel is ranked within its own chain and brand; continent is taken from each hotel\'s country (IHG) or metro-code prefix (Marriott). Rankings need a minimum review count per hotel (adjustable) and exclude inactive listings (no new review in 24+ months, e.g. rebranded or closed hotels). Catalog is cached locally and refreshes monthly. Removed-review tracking compares each load against the last review snapshot saved in this browser, so it only sees removals that happen between your own visits.';
 }
 
 /* ---------- init ---------- */
