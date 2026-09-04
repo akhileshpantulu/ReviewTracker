@@ -151,6 +151,10 @@ a{color:var(--accent);text-decoration:none;}
 .dd-asset.dd-focal{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft),var(--shadow);}
 .dd-asset .chart-card{box-shadow:none;border-color:var(--line);}
 .tag-focal{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;background:var(--accent-soft);color:var(--accent);padding:2px 7px;border-radius:6px;vertical-align:middle;margin-left:6px;}
+.rm-asset{padding:9px 0;border-bottom:1px solid var(--line);}
+.rm-asset:last-child{border-bottom:none;}
+.rm-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;}
+.rm-note{color:var(--muted);font-size:12px;}
 .cats{display:flex;flex-wrap:wrap;gap:14px;color:var(--muted);font-size:12px;margin:2px 0 14px;}
 .cats b{color:var(--text);}
 .footer{color:var(--faint);font-size:11px;margin-top:26px;line-height:1.7;border-top:1px solid var(--border);padding-top:16px;}
@@ -190,6 +194,8 @@ const CATALOG_TTL_MS = 30 * 24 * 3600 * 1000;
 const STALE_MS = 24 * 30 * 24 * 3600 * 1000;
 const LS_FOCAL = 'hrr_focal_v1';
 const LS_COMP = 'hrr_comp_v1';
+const LS_SNAP = 'hrr_snap_v1:';     // + chain:code -> last-seen review snapshot
+const LS_REMOVED = 'hrr_removed_v1'; // log of reviews that disappeared between refreshes
 
 const THEMES = {
   'Small/cramped rooms': /\b(tiny|cramped|small room|too small|claustrophobic|petite chambre|chambre exigu)/i,
@@ -362,14 +368,17 @@ function catalogReady(){
   // restore focal if saved
   if(!focal){ try{ const sv=JSON.parse(localStorage.getItem(LS_FOCAL)); if(sv&&sv.chain&&sv.code){ const it=catalog.find(p=>(p.chain||'Marriott')===sv.chain&&p.c===sv.code); if(it) selectFocal(it,true); } }catch(e){} }
   try{ const cs=JSON.parse(localStorage.getItem(LS_COMP)); if(Array.isArray(cs)){ comp=cs.map(x=>catalog.find(p=>(p.chain||'Marriott')===x.chain&&p.c===x.code)).filter(Boolean); } }catch(e){}
+  comp.forEach(p=>ensureReviews(p)); // refresh comp snapshots too, so removal tracking covers the whole set
   if(focal) renderOverview();
 }
 
 /* ---------- reviews fetch (focal only) ---------- */
 async function fetchAll(productId, chain){
-  const key=PASSKEYS[chain]||PASSKEYS.Marriott; let all=[],offset=0;
-  while(true){ const url=`https://api.bazaarvoice.com/data/reviews.json?passkey=${key}&apiversion=5.5&Filter=ProductId:${productId.toUpperCase()}&Sort=SubmissionTime:asc&Limit=100&Offset=${offset}`; const j=await (await fetch(url)).json(); all=all.concat(j.Results||[]); if(!j.TotalResults||all.length>=j.TotalResults||(j.Results||[]).length===0) break; offset+=100; if(offset>4000)break; }
-  return all.map(r=>({date:r.SubmissionTime,overall:r.Rating,title:r.Title||'',text:r.ReviewText||'',Cleanliness:r.SecondaryRatings?.Cleanliness?.Value,Service:r.SecondaryRatings?.Service?.Value,Location:r.SecondaryRatings?.Location?.Value,Amenities:r.SecondaryRatings?.Amenities?.Value,Dining:r.SecondaryRatings?.Dining?.Value,Value:r.SecondaryRatings?.Value?.Value}));
+  const key=PASSKEYS[chain]||PASSKEYS.Marriott; let all=[],offset=0,partial=false;
+  while(true){ const url=`https://api.bazaarvoice.com/data/reviews.json?passkey=${key}&apiversion=5.5&Filter=ProductId:${productId.toUpperCase()}&Sort=SubmissionTime:asc&Limit=100&Offset=${offset}`; const j=await (await fetch(url)).json(); all=all.concat(j.Results||[]); if(!j.TotalResults||all.length>=j.TotalResults||(j.Results||[]).length===0) break; offset+=100; if(offset>4000){partial=true;break;} }
+  const out=all.map(r=>({id:r.Id,date:r.SubmissionTime,overall:r.Rating,title:r.Title||'',text:r.ReviewText||'',Cleanliness:r.SecondaryRatings?.Cleanliness?.Value,Service:r.SecondaryRatings?.Service?.Value,Location:r.SecondaryRatings?.Location?.Value,Amenities:r.SecondaryRatings?.Amenities?.Value,Dining:r.SecondaryRatings?.Dining?.Value,Value:r.SecondaryRatings?.Value?.Value}));
+  out.partial=partial; // true when the fetch was truncated — snapshot comparison would be unreliable
+  return out;
 }
 
 /* ---------- search ---------- */
@@ -415,16 +424,21 @@ function rerender(){ if(!focal) return; currentTab==='deepdive'?renderDeepDive()
 
 /* ---------- ranking math ---------- */
 function idxRank(arr,code,chain){ const i=arr.findIndex(x=>x.code===code&&x.chain===chain); if(i<0) return null; const N=arr.length; return {rank:i+1,N:N,pct:N>1?(N-(i+1))/(N-1)*100:100}; }
-function computeRanking(){
-  const chain=focal.chain||'Marriott';
-  const brand=resolveBrand(focal.b, focal.n);
-  const cont=focal.ct||continentOf(focal.c);
+function computeRankingFor(asset){
+  const chain=asset.chain||'Marriott';
+  const brand=resolveBrand(asset.b, asset.n);
+  const cont=asset.ct||continentOf(asset.c);
   let pool=catalog.filter(p=>(p.chain||'Marriott')===chain&&p.b===brand&&p.s!=null&&(p.nr||0)>=minRev&&!isStale(p));
-  if(!pool.some(p=>p.c===focal.c&&(p.chain||'Marriott')===chain)) pool=pool.concat([focal]);
+  if(!pool.some(p=>p.c===asset.c&&(p.chain||'Marriott')===chain)) pool=pool.concat([asset]);
   pool=pool.map(p=>({code:p.c,name:p.n,sc:p.s,n:p.nr||0,cont:p.ct||continentOf(p.c),chain:(p.chain||'Marriott')})).sort((a,b)=>b.sc-a.sc);
-  const world=idxRank(pool,focal.c,chain);
+  const world=idxRank(pool,asset.c,chain);
   const buckets={}; pool.forEach(x=>{(buckets[x.cont]=buckets[x.cont]||[]).push(x);});
-  const contRank=idxRank(buckets[cont]||[],focal.c,chain);
+  const contRank=idxRank(buckets[cont]||[],asset.c,chain);
+  return {chain,brand,cont,pool,buckets,world,contRank};
+}
+function computeRanking(){
+  const base=computeRankingFor(focal);
+  const chain=base.chain;
   // comp set
   let compRank=null, compArr=[];
   if(comp.length){
@@ -432,7 +446,7 @@ function computeRanking(){
       .map(p=>({code:p.c,name:p.n,sc:p.s,n:p.nr||0,chain:(p.chain||'Marriott')})).sort((a,b)=>b.sc-a.sc);
     compRank=idxRank(compArr,focal.c,chain);
   }
-  return {chain,brand,cont,pool,buckets,world,contRank,compRank,compArr};
+  return Object.assign({},base,{compRank,compArr});
 }
 
 /* ---------- Overview render ---------- */
@@ -481,6 +495,33 @@ function renderOverview(){
   if(comp.length) h+=rankCard('',`Rank in your comp set`,R.compRank, `${(R.compArr||[]).length} hotels`);
   else h+=`<div class="rankcard"><div class="rc-k">Comp set</div><div class="rc-empty">Add competitors with “+ compare” in search to rank ${escapeHtml(shortBrand(R.brand))} against a custom set.</div></div>`;
   h+=`</div>`;
+  // per-asset rankings overview (comp set)
+  if(comp.length){
+    const rows=assetList().map(it=>{
+      const AR=computeRankingFor(it);
+      return {it,AR,isF:it.c===focal.c&&(it.chain||'Marriott')===chain};
+    }).sort((a,b)=>{
+      if(a.it.s==null&&b.it.s==null) return 0;
+      if(a.it.s==null) return 1; if(b.it.s==null) return -1;
+      return b.it.s-a.it.s;
+    });
+    let cr=0;
+    h+=`<div class="panel"><div class="panel-h"><h3>Comp set — rankings per asset (${rows.length} hotels)</h3><div class="hint">brand ranks are within each hotel’s own chain &amp; brand · min ${minRev} reviews</div></div>`+
+       `<div class="panel-b" style="overflow-x:auto"><table class="tbl"><thead><tr><th>#</th><th>Hotel</th><th>Brand</th><th class="num">Rating</th><th class="num">Reviews</th><th class="num">Rank in continent</th><th class="num">Rank worldwide</th></tr></thead><tbody>`;
+    rows.forEach(r=>{
+      const ch=r.it.chain||'Marriott';
+      const rank=r.it.s!=null?++cr:null;
+      const contStr=r.AR.contRank?`#${r.AR.contRank.rank} / ${r.AR.contRank.N} <span style="color:var(--faint)">(${escapeHtml(r.AR.cont)})</span>`:'—';
+      const worldStr=r.AR.world?`#${r.AR.world.rank} / ${r.AR.world.N}`:'—';
+      h+=`<tr class="${r.isF?'foc':''}"><td class="num">${rank!=null?rank:'—'}</td>`+
+         `<td>${escapeHtml(r.it.n)}${r.isF?' <span class="tag-focal">Focal</span>':''}</td>`+
+         `<td><span class="chip-chain chain-${ch}">${ch}</span> <span style="color:var(--muted)">${escapeHtml(shortBrand(r.AR.brand))}</span></td>`+
+         `<td class="num">${r.it.s!=null?`<span class="pill ${gradeClass(r.it.s)}">${r.it.s.toFixed(2)}</span>`:'—'}</td>`+
+         `<td class="num">${(r.it.nr||0).toLocaleString()}</td>`+
+         `<td class="num">${contStr}</td><td class="num">${worldStr}</td></tr>`;
+    });
+    h+=`</tbody></table></div></div>`;
+  }
   // continent table
   h+=`<div class="panel"><div class="panel-h"><h3>${escapeHtml(R.brand)} — rating by continent</h3>`+
      `<div class="ctl">Min reviews / hotel <select onchange="setMinRev(this.value)">`+[1,5,10,25,50].map(v=>`<option value="${v}"${v===minRev?' selected':''}>${v}</option>`).join('')+`</select></div></div>`+
@@ -508,6 +549,8 @@ function renderOverview(){
   if(!comp.length){ h+=`<div style="color:var(--muted);font-size:13px">No competitors added. Search a hotel and click “+ compare” to benchmark ${escapeHtml(focal.n)} against a set you choose.</div>`; }
   else{ h+=`<div class="comp-chips">`; comp.forEach((p,i)=>{ h+=`<span class="cchip"><span class="chip-chain chain-${p.chain||'Marriott'}">${p.chain||'Marriott'}</span> ${escapeHtml(p.n)} <span class="num" style="color:var(--muted)">${p.s!=null?p.s.toFixed(2):'—'}</span><button class="x" onclick="removePeer(${i})">×</button></span>`; }); h+=`</div>`; }
   h+=`</div></div>`;
+  // removed-review tracker
+  h+=removedPanel();
   h+=`<div style="margin-top:6px"><a onclick="showTab('deepdive')" style="cursor:pointer;font-weight:600">View review deep dive for ${escapeHtml(focal.n)} →</a></div>`;
   V.innerHTML=h;
   renderFooter();
@@ -523,8 +566,60 @@ function ensureReviews(it){
   if(reviewCache[k]!==undefined || pendingReviews[k]) return;
   pendingReviews[k]=1;
   fetchAll(it.c, it.chain||'Marriott')
-    .then(rv=>{ reviewCache[k]=rv; delete pendingReviews[k]; if(currentTab==='deepdive') renderDeepDive(); })
+    .then(rv=>{ reviewCache[k]=rv; delete pendingReviews[k]; trackRemoved(it,rv); if(currentTab==='deepdive') renderDeepDive(); else if(focal) renderOverview(); })
     .catch(()=>{ reviewCache[k]=[]; delete pendingReviews[k]; if(currentTab==='deepdive') renderDeepDive(); });
+}
+
+/* ---------- removed-review tracker ---------- */
+function loadRemovedLog(){ try{ return JSON.parse(localStorage.getItem(LS_REMOVED))||{}; }catch(e){ return {}; } }
+function saveRemovedLog(log){ try{ localStorage.setItem(LS_REMOVED, JSON.stringify(log)); }catch(e){} }
+function loadSnap(k){ try{ return JSON.parse(localStorage.getItem(LS_SNAP+k)); }catch(e){ return null; } }
+function trackRemoved(it, rv){
+  // Skip unreliable comparisons: truncated fetches and empty results (likely an API glitch, not a mass removal).
+  if(rv.partial || !rv.length) return;
+  const k=keyOf(it);
+  const prev=loadSnap(k);
+  const nowIds=new Set(rv.map(r=>r.id).filter(Boolean));
+  if(prev && Array.isArray(prev.e)){
+    const gone=prev.e.filter(s=>s.i && !nowIds.has(s.i));
+    if(gone.length){
+      const log=loadRemovedLog();
+      const slot=log[k]=log[k]||{n:it.n,e:[]};
+      const seen=new Set(slot.e.map(x=>x.i));
+      gone.forEach(g=>{ if(!seen.has(g.i)) slot.e.push(Object.assign({},g,{rm:Date.now()})); });
+      slot.e=slot.e.slice(-100); slot.n=it.n;
+      saveRemovedLog(log);
+    }
+  }
+  const snap={t:Date.now(),e:rv.filter(r=>r.id).map(r=>({i:r.id,d:String(r.date||'').slice(0,10),o:r.overall,t:String(r.title||'').slice(0,80),x:String(r.text||'').slice(0,140)}))};
+  try{ localStorage.setItem(LS_SNAP+k, JSON.stringify(snap)); }
+  catch(e){ try{ snap.e=snap.e.map(s=>({i:s.i,d:s.d,o:s.o})); localStorage.setItem(LS_SNAP+k, JSON.stringify(snap)); }catch(e2){} }
+}
+function clearRemoved(){ try{ localStorage.removeItem(LS_REMOVED); }catch(e){} rerender(); }
+function removedPanel(){
+  const log=loadRemovedLog();
+  const list=assetList();
+  if(!list.length) return '';
+  let total=0; list.forEach(it=>{ const s=log[keyOf(it)]; if(s&&s.e) total+=s.e.length; });
+  let h=`<div class="panel"><div class="panel-h"><h3>Removed reviews${total?` <span class="pill b" style="margin-left:4px">${total}</span>`:''}</h3>`+
+     `<div class="hint">reviews that disappeared between refreshes · tracked in this browser${total?` · <a onclick="clearRemoved()" style="cursor:pointer">clear log</a>`:''}</div></div><div class="panel-b">`;
+  list.forEach(it=>{
+    const k=keyOf(it); const slot=log[k]; const snap=loadSnap(k); const ch=it.chain||'Marriott';
+    h+=`<div class="rm-asset"><div class="rm-head"><span class="chip-chain chain-${ch}">${ch}</span> <b>${escapeHtml(it.n)}</b>`;
+    if(slot&&slot.e.length) h+=` <span class="pill b">${slot.e.length} removed</span>`;
+    if(snap) h+=` <span class="rm-note">baseline ${snap.e.length.toLocaleString()} reviews · saved ${new Date(snap.t).toISOString().slice(0,10)}${slot&&slot.e.length?'':' · none removed yet'}</span>`;
+    else if(pendingReviews[k]) h+=` <span class="rm-note">loading reviews…</span>`;
+    else h+=` <span class="rm-note">no baseline yet</span>`;
+    h+=`</div>`;
+    if(slot&&slot.e.length){
+      const show=slot.e.slice().reverse().slice(0,5);
+      show.forEach(g=>{ h+=`<div class="quote"><div class="qd">reviewed ${escapeHtml(g.d||'?')}${g.o!=null?' · '+g.o+'★':''} · removal detected ${new Date(g.rm).toISOString().slice(0,10)}</div>${g.t?`<div class="qt">${escapeHtml(g.t)}</div>`:''}${g.x?`<div class="qx">${escapeHtml(g.x)}${g.x.length>=140?'…':''}</div>`:''}</div>`; });
+      if(slot.e.length>show.length) h+=`<div class="rm-note" style="margin-top:6px">…and ${slot.e.length-show.length} more</div>`;
+    }
+    h+=`</div>`;
+  });
+  h+=`</div></div>`;
+  return h;
 }
 function assetList(){ const list=[]; const seen={}; if(focal){ list.push(focal); seen[keyOf(focal)]=1; } comp.forEach(p=>{ const k=keyOf(p); if(!seen[k]){ seen[k]=1; list.push(p); } }); return list; }
 
@@ -590,7 +685,7 @@ function showTab(t){
 }
 
 function renderFooter(){
-  $('footer').innerHTML='Source: Bazaar Voice guest-review API (Marriott Bonvoy + IHG display keys). Ratings are verified post-stay guest reviews. A hotel is ranked within its own chain and brand; continent is taken from each hotel\'s country (IHG) or metro-code prefix (Marriott). Rankings need a minimum review count per hotel (adjustable) and exclude inactive listings (no new review in 24+ months, e.g. rebranded or closed hotels). Catalog is cached locally and refreshes monthly.';
+  $('footer').innerHTML='Source: Bazaar Voice guest-review API (Marriott Bonvoy + IHG display keys). Ratings are verified post-stay guest reviews. A hotel is ranked within its own chain and brand; continent is taken from each hotel\'s country (IHG) or metro-code prefix (Marriott). Rankings need a minimum review count per hotel (adjustable) and exclude inactive listings (no new review in 24+ months, e.g. rebranded or closed hotels). Catalog is cached locally and refreshes monthly. Removed-review tracking compares each load against the last review snapshot saved in this browser, so it only sees removals that happen between your own visits.';
 }
 
 /* ---------- init ---------- */
